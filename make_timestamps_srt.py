@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys, re, subprocess, xml.etree.ElementTree as ET
+import argparse
 from urllib.parse import unquote, urlparse
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -77,6 +78,53 @@ def to_local_no_seconds(dt_str):
     local_dt = dt.astimezone(local_tz)
     return local_dt.strftime("%Y-%m-%d %H:%M")
 
+def to_local_datetime(dt_str):
+    """
+    Convert a datetime string (possibly with or without timezone) to local time
+    and return a timezone-aware datetime object with seconds preserved.
+    If input is timezone-naive, assume UTC (common for QuickTime CreateDate).
+    Returns None if parsing fails.
+    """
+    if not dt_str:
+        return None
+    fmts = [
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ]
+    dt = None
+    for f in fmts:
+        try:
+            dt = datetime.strptime(dt_str, f)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_tz = datetime.now().astimezone().tzinfo
+    return dt.astimezone(local_tz)
+
+def format_local_datetime(local_dt, display_type):
+    """
+    Format a timezone-aware local datetime into a caption string based on
+    display type. Supported types:
+      - "detailed": "YYYY-MM-DD HH:MM"
+      - "readable": "Mon Oct 2. HH:MM" (no year, short day/month, no leading zero in day)
+    """
+    if local_dt is None:
+        return None
+    if display_type == "detailed":
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    # default to readable
+    # Use %d and strip leading zero in a portable way
+    readable = local_dt.strftime("%a %b %d. %H:%M")
+    # Replace only the leading zero in day-of-month; pattern " 0" occurs before day
+    readable = readable.replace(" 0", " ")
+    return readable
+
 def url_to_path(url):
     # Handle file:// URLs from FCP XML
     if url.startswith("file://"):
@@ -152,11 +200,22 @@ def gather_v1_clips(root):
 # --- Main ------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 make_timestamps_srt.py <sequence.xml>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Generate SRT of clip timestamps from a Premiere/FCP XML sequence (V1 track).")
+    parser.add_argument("sequence_xml", help="Path to the exported sequence XML")
+    parser.add_argument("--display", choices=["readable", "detailed"], help="Date/time display type. Defaults to readable.")
+    parser.add_argument("--readable", action="store_true", help="Use readable date format (e.g., 'Mon Oct 2. HH:MM').")
+    parser.add_argument("--detailed", action="store_true", help="Use detailed date format (e.g., 'YYYY-MM-DD HH:MM').")
+    args = parser.parse_args()
 
-    xml_path = sys.argv[1]
+    # Resolve display type preference; default is readable
+    if args.display:
+        display_type = args.display
+    elif args.detailed:
+        display_type = "detailed"
+    else:
+        display_type = "readable"
+
+    xml_path = args.sequence_xml
     base_name = os.path.splitext(os.path.basename(xml_path))[0]
     out_dir = os.path.dirname(xml_path)
     out_path = os.path.join(out_dir, f"timestamps_{base_name}.srt")
@@ -184,9 +243,10 @@ def main():
             # If no datetime found, mark clearly so you spot it
             caption = f"[NO-DATE] {c['name']}"
         else:
-            # Normalize to local time and drop seconds/timezone
-            local_fmt = to_local_no_seconds(dt)
-            caption = local_fmt if local_fmt else dt
+            # Normalize to local time and format per selected display type
+            local_dt = to_local_datetime(dt)
+            formatted = format_local_datetime(local_dt, display_type)
+            caption = formatted if formatted else dt
 
         lines.append(f"{idx}")
         lines.append(f"{start_tc} --> {end_tc}")
